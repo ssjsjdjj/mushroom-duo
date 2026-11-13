@@ -1,0 +1,50 @@
+import assert from 'node:assert/strict';
+import {Prediction} from '../app/lib/prediction.ts';
+import {STEP,PROTOCOL,worldFrom,countCoins} from '../app/lib/game.ts';
+import {driveFactory} from './factory-driver.mjs';
+import {emptyProgress,observeRun,parseProgress} from '../app/lib/records.ts';
+const origin=process.env.TEST_ORIGIN||'http://127.0.0.1:5173',extra=Number(process.env.TEST_LATENCY_MS||0),jitter=Number(process.env.TEST_JITTER_MS||0),drop=process.env.TEST_DROP_RESPONSE==='1',finderSlot=Number(process.env.TEST_FINDER_SLOT||0);
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));let calls=0;
+const result={origin,finderSlot,extraRoundTripMs:extra,jitterMs:jitter,droppedResponses:0,duplicateRequests:0,cratePushed:false,relay:false,keyDropped:false,rescue:false,safeCrateReset:false,checkpointRetry:false,savedRolesRestored:false,duplicateRestoreStable:false,bothWon:false,recordDeduplicated:false,oldResetRejected:false,maxRoundTripMs:0};
+async function api(body,expected=200,network=false){const delay=network?extra/2+(calls++%4)*jitter/3:0;await sleep(delay);const start=performance.now();const response=await fetch(origin+'/api/room',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body),signal:AbortSignal.timeout(15000)});const value=await response.json();await sleep(delay);result.maxRoundTripMs=Math.max(result.maxRoundTripMs,Math.round(performance.now()-start+delay));assert.equal(response.status,expected,value.error||'HTTP status');return value;}
+const first=await api({action:'create',level:'factory'});let code=first.room.code;
+const second=await api({action:'join',code});assert.equal(first.room.campaign,false);assert.equal(first.room.journey,false);
+await api({action:'join',code},409);await api({action:'factory-key',code,token:first.token},400);
+const forged=await api({action:'input',code,token:first.token,protocol:PROTOCOL,connection:0,epoch:0,frames:[],factory:{crateX:330,keyOwner:0,unlocked:true}});assert.equal(forged.room.factory.crateX,220);assert.equal(forged.room.factory.keyOwner,null);assert.equal(forged.room.open,false);
+await api({action:'input',code,token:first.token,protocol:PROTOCOL-1,frames:[]},409);
+const bots=[first,second].map((r,slot)=>({slot,token:r.token,room:second.room,prediction:new Prediction(),jump:0,pending:false,lastGood:performance.now(),sent:0,journal:emptyProgress()}));
+function reset(bot,r){bot.room=r;bot.prediction.reset({...r.players[bot.slot],token:bot.token},r.defeated,worldFrom(r));bot.jump=r.players[bot.slot].jump;bot.factoryPhase=0;bot.lastGood=performance.now();bot.journal=observeRun(bot.journal,r).progress;}
+function accept(bot,r){if(r.epoch<bot.room.epoch||r.epoch===bot.room.epoch&&r.revision<bot.room.revision)return;if(r.epoch!==bot.room.epoch||r.players[bot.slot].connection!==bot.room.players[bot.slot].connection)reset(bot,r);else{bot.prediction.reconcile({...r.players[bot.slot],token:bot.token},r.open,r.defeated,worldFrom(r));bot.room=r;bot.lastGood=performance.now();bot.journal=observeRun(bot.journal,r).progress;}}
+for(const bot of bots)reset(bot,second.room);
+const latest=()=>bots.map(b=>b.room).sort((a,b)=>b.epoch-a.epoch||b.revision-a.revision)[0];
+let paused=false,failure=null,mission='normal',stage=0,acc=0,last=performance.now();const deadline=last+Number(process.env.TEST_LIMIT_MS||300000);
+async function send(bot){if(paused||bot.pending)return;bot.pending=true;try{const body={action:'input',code,token:bot.token,protocol:PROTOCOL,connection:bot.room.players[bot.slot].connection,epoch:bot.room.epoch,frames:bot.prediction.frames.map(f=>({...f}))};const r=await api(body,200,true);bot.sent++;if(drop&&!result.droppedResponses&&bot.slot!==finderSlot&&r.room.factory.crateX>=260&&!r.room.factory.keyTaken){result.droppedResponses++;return;}accept(bot,r.room);if(bot.sent===3){accept(bot,(await api(body)).room);result.duplicateRequests++;}}catch(e){failure=e;}finally{bot.pending=false;}}
+const sim=setInterval(()=>{const now=performance.now();if(paused){last=now;acc=0;return;}acc+=Math.min((now-last)/1000,.1);last=now;while(acc>=STEP){for(const bot of bots)if(bot.room.players.every(p=>p?.online)&&!bot.room.won&&now-bot.lastGood<2500){const c=driveFactory(bot,{finderSlot,phase:mission});bot.prediction.record(c.dir,c.jump,bot.room.open,c.hold,c.use);}acc-=STEP;}},8);
+const net=setInterval(()=>{for(const bot of bots)void send(bot);},90);
+async function settle(){paused=true;while(bots.some(b=>b.pending))await sleep(20);}
+try{
+  while(!bots.every(b=>b.room.won)){
+    if(failure)throw failure;const r=latest();assert.ok(performance.now()<deadline,'factory timed out '+JSON.stringify({stage,mission,room:r,bots:bots.map(b=>({slot:b.slot,phase:b.factoryPhase,p:b.prediction.player}))}));
+    if(r.factory.crateX>=320&&r.factory.pushDistance>90)result.cratePushed=true;
+    if(r.factory.transfers===1&&r.factory.finder===finderSlot)result.relay=true;
+    if(r.players.some(p=>p?.downed)&&r.factory.keyOwner===null&&r.factory.keyTaken)result.keyDropped=true;
+    if(stage===0&&r.checkpoint){
+      await settle();const old=latest(),resetRoom=await api({action:'factory-reset',code,token:bots[finderSlot].token,connection:old.players[finderSlot].connection,epoch:old.epoch});
+      assert.equal(resetRoom.room.factory.crateX,330);assert.equal(resetRoom.room.factory.keyOwner,1-finderSlot);assert.equal(resetRoom.room.factory.finder,finderSlot);assert.equal(resetRoom.room.factory.transfers,1);assert.equal(resetRoom.room.factory.resets,1);assert.equal(resetRoom.room.coins,old.coins);assert.equal(resetRoom.room.wipes,old.wipes+1);assert.ok(resetRoom.room.players.every(p=>p.grounded&&p.y===420));
+      const stale=await api({action:'factory-reset',code,token:bots[finderSlot].token,connection:old.players[finderSlot].connection,epoch:old.epoch});assert.equal(stale.room.epoch,resetRoom.room.epoch);assert.equal(stale.room.factory.resets,1);result.safeCrateReset=true;result.oldResetRejected=true;for(const bot of bots)reset(bot,stale.room);stage=1;mission='rescue';paused=false;console.log('PASS: held crate push, elevated key, two-person handoff, shared checkpoint and idempotent safe box reset');
+    }
+    if(stage===1&&r.rescues>=1){
+      result.rescue=true;await settle();const previous=latest();const cp=await api({action:'checkpoint',code,token:bots[finderSlot].token,connection:previous.players[finderSlot].connection,epoch:previous.epoch});assert.equal(cp.room.factory.keyOwner,1-finderSlot);assert.equal(cp.room.factory.transfers,1);assert.equal(cp.room.rescues,previous.rescues);assert.equal(cp.room.coins,previous.coins);result.checkpointRetry=true;
+      const saved=await api({action:'save',code,token:bots[finderSlot].token,connection:cp.room.players[finderSlot].connection,epoch:cp.room.epoch});assert.equal(saved.save.level,'factory');assert.equal(saved.save.mode,'factory');assert.equal(saved.save.slot,finderSlot);assert.ok(!JSON.stringify(saved.room).includes(saved.save.key));
+      for(const bot of bots)await api({action:'leave',code,token:bot.token,connection:cp.room.players[bot.slot].connection});
+      const [back,retry]=await Promise.all([api({action:'restore',saveKey:saved.save.key}),api({action:'restore',saveKey:saved.save.key})]);assert.equal(back.room.code,retry.room.code);assert.equal(back.token,retry.token);assert.equal(back.slot,finderSlot);assert.equal(back.room.factory.keyOwner,1-finderSlot);assert.equal(back.room.factory.finder,finderSlot);assert.equal(back.room.coins,cp.room.coins);assert.equal(back.room.wipes,cp.room.wipes);assert.equal(back.room.rescues,cp.room.rescues);assert.equal(back.room.runId,first.room.runId);code=back.room.code;
+      const friend=await api({action:'join',code});assert.equal(friend.slot,1-finderSlot);bots[finderSlot].token=back.token;bots[1-finderSlot].token=friend.token;for(const bot of bots)reset(bot,friend.room);result.savedRolesRestored=true;result.duplicateRestoreStable=true;stage=2;mission='normal';paused=false;console.log('PASS: pit drops one key, teammate rescues, checkpoint and save restore retain roles/coins/scores, concurrent restores share a room');
+    }
+    await sleep(60);
+  }
+  await settle();const r=latest();assert.equal(r.factory.finder,finderSlot);assert.equal(r.factory.deliveredBy,1-finderSlot);assert.equal(r.factory.transfers,1);assert.equal(r.factory.keyOwner,null);assert.ok(r.factory.unlocked&&r.players.every(p=>p.x>1060&&!p.downed));assert.equal(r.results.length,1);assert.equal(r.results[0].coins,countCoins(r.coins));assert.ok(countCoins(r.coins)>0&&countCoins(r.coins)<=8);result.coins=countCoins(r.coins);result.bothWon=true;
+  for(const bot of bots){bot.journal=observeRun(bot.journal,r).progress;assert.equal(bot.journal.stats.factory.clears,1);bot.journal=parseProgress(JSON.stringify(bot.journal));for(let i=0;i<5;i++)bot.journal=observeRun(bot.journal,r).progress;assert.equal(bot.journal.stats.factory.clears,1);assert.equal(bot.journal.stats.journey.clears,0);}result.recordDeduplicated=true;
+  const one=await api({action:'again',code,token:bots[0].token,connection:r.players[0].connection,epoch:r.epoch});assert.equal(one.room.won,true);const again=await api({action:'again',code,token:bots[1].token,connection:r.players[1].connection,epoch:r.epoch});assert.equal(again.room.factory.crateX,220);assert.equal(again.room.factory.keyOwner,null);assert.equal(again.room.level,'factory');assert.equal(again.room.checkpoint,false);assert.equal(again.room.coins,0);assert.notEqual(again.room.runId,first.room.runId);
+  console.log('PASS: receiver unlocks, both reach exit, independent records deduplicate and both-ready replay resets the factory');
+}finally{paused=true;clearInterval(sim);clearInterval(net);while(bots.some(b=>b.pending))await sleep(20);for(const bot of bots)await api({action:'leave',code,token:bot.token}).catch(()=>{});}
+if(drop)assert.equal(result.droppedResponses,1);for(const [key,value] of Object.entries(result))if(typeof value==='boolean')assert.ok(value,key+' was not exercised');console.log('RESULT '+JSON.stringify(result));

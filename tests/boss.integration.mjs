@@ -1,0 +1,38 @@
+import assert from 'node:assert/strict';
+import {Prediction} from '../app/lib/prediction.ts';
+import {STEP,PROTOCOL,worldFrom} from '../app/lib/game.ts';
+import {driveBoss} from './boss-driver.mjs';
+const origin=process.env.TEST_ORIGIN||'http://127.0.0.1:5173',extra=Number(process.env.TEST_LATENCY_MS||0),jitter=Number(process.env.TEST_JITTER_MS||0),drop=process.env.TEST_DROP_RESPONSE==='1',recovery=process.env.TEST_BOSS_RECOVERY==='1';
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));let calls=0;
+const result={origin,extraRoundTripMs:extra,jitterMs:jitter,droppedResponses:0,duplicateRequests:0,rescue:false,checkpointRetry:false,warningResume:false,oldConnectionRejected:false,alternatingHits:false,bothWon:false,maxRoundTripMs:0};
+async function api(body,expected=200,network=false){const delay=network?extra/2+(calls++%4)*jitter/3:0;await sleep(delay);const start=performance.now();const response=await fetch(origin+'/api/room',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body),signal:AbortSignal.timeout(15000)});const data=await response.json();await sleep(delay);result.maxRoundTripMs=Math.max(result.maxRoundTripMs,Math.round(performance.now()-start+delay));assert.equal(response.status,expected,data.error);return data;}
+const a=await api({action:'create',level:'boss'}),b=await api({action:'join',code:a.room.code});assert.equal(a.room.level,'boss');assert.equal(a.room.campaign,false);await api({action:'boss-hit',code:a.room.code,token:a.token,damage:99},400);const claimed=await api({action:'input',code:a.room.code,token:a.token,protocol:PROTOCOL,connection:0,epoch:0,frames:[],boss:{hp:0}});assert.equal(claimed.room.boss.hp,3);await api({action:'join',code:a.room.code},409);
+const bots=[a,b].map((r,slot)=>({slot,token:r.token,room:b.room,prediction:new Prediction(),jump:0,pending:false,lastGood:performance.now(),sent:0}));
+function reset(bot,r){bot.room=r;bot.prediction.reset({...r.players[bot.slot],token:bot.token},r.defeated,worldFrom(r));bot.jump=r.players[bot.slot].jump;bot.retreat=false;bot.attackJump=false;bot.attempt=-1;bot.lastGood=performance.now();}
+for(const bot of bots)reset(bot,b.room);
+function accept(bot,r){if(r.epoch<bot.room.epoch||r.epoch===bot.room.epoch&&r.revision<bot.room.revision)return;if(r.epoch!==bot.room.epoch||r.players[bot.slot].connection!==bot.room.players[bot.slot].connection)reset(bot,r);else{bot.prediction.reconcile({...r.players[bot.slot],token:bot.token},r.open,r.defeated,worldFrom(r));bot.room=r;bot.lastGood=performance.now();}}
+let paused=false,failure=null,mission=recovery?'rescue':'fight',testedWarning=false,acc=0,last=performance.now();const deadline=last+Number(process.env.TEST_LIMIT_MS||180000);
+const latest=()=>bots.map(b=>b.room).sort((a,b)=>b.epoch-a.epoch||b.revision-a.revision)[0];
+async function send(bot){if(paused||bot.pending)return;bot.pending=true;try{const body={action:'input',code:a.room.code,token:bot.token,protocol:PROTOCOL,connection:bot.room.players[bot.slot].connection,epoch:bot.room.epoch,frames:bot.prediction.frames.map(f=>({...f}))};const r=await api(body,200,true);bot.sent++;if(drop&&bot.slot===1&&!result.droppedResponses&&r.room.boss.hp<3){result.droppedResponses++;return;}accept(bot,r.room);if(bot.sent===3){accept(bot,(await api(body)).room);result.duplicateRequests++;}}catch(e){failure=e;}finally{bot.pending=false;}}
+const sim=setInterval(()=>{const now=performance.now();if(paused){last=now;acc=0;return;}acc+=Math.min((now-last)/1000,.1);last=now;while(acc>=STEP){for(const bot of bots)if(bot.room.players.every(p=>p?.online)&&!bot.room.won&&now-bot.lastGood<2500){const c=driveBoss(bot,mission);bot.prediction.record(c.dir,c.jump,bot.room.open,c.hold,c.use);}acc-=STEP;}},8);
+const net=setInterval(()=>{for(const bot of bots)void send(bot);},90);
+try{
+  while(!bots.every(b=>b.room.won)){
+    if(failure)throw failure;const r=latest();assert.ok(performance.now()<deadline,'boss timed out '+JSON.stringify({mission,boss:r.boss,players:r.players.map(p=>({x:p.x,y:p.y,h:p.hearts,d:p.downed,g:p.generation})),bots:bots.map(b=>({slot:b.slot,retreat:b.retreat,attack:b.attackJump,jump:b.jump}))}));
+    if(mission==='rescue'&&r.rescues===1){
+      result.rescue=true;paused=true;while(bots.some(b=>b.pending))await sleep(20);
+      const saved=latest();assert.ok(saved.checkpoint);const resetRoom=await api({action:'checkpoint',code:a.room.code,token:a.token,connection:saved.players[0].connection,epoch:saved.epoch});assert.equal(resetRoom.room.boss.hp,3);assert.equal(resetRoom.room.rescues,1);assert.equal(resetRoom.room.wipes,1);assert.deepEqual(resetRoom.room.players.map(p=>p.x),[190,228]);for(const bot of bots)reset(bot,resetRoom.room);result.checkpointRetry=true;mission='fight';paused=false;console.log('PASS: real boss slam downs a teammate; held rescue and safe checkpoint retry');
+    }
+    if(mission==='fight'&&recovery&&!testedWarning&&r.boss.phase==='warning'){
+      testedWarning=true;paused=true;while(bots.some(b=>b.pending))await sleep(20);const old=latest(),oldConnection=old.players[0].connection;
+      const away=await api({action:'away',code:a.room.code,token:a.token,connection:oldConnection,epoch:old.epoch});const state=structuredClone(away.room.boss);await sleep(1200);const frozen=await api({action:'poll',code:a.room.code,token:b.token,connection:away.room.players[1].connection});assert.deepEqual(frozen.room.boss,state);
+      const resumed=await api({action:'resume',code:a.room.code,token:a.token,connection:oldConnection,epoch:old.epoch});assert.equal(resumed.room.players[0].away,false);assert.equal(resumed.room.boss.hp,state.hp);
+      const late=await api({action:'input',code:a.room.code,token:a.token,protocol:PROTOCOL,connection:oldConnection,epoch:old.epoch,frames:[{n:1,dir:1,jump:99,hold:true,use:true,generation:old.players[0].generation}]});assert.equal(late.room.players[0].ack,0);assert.equal(late.room.players[0].x,resumed.room.players[0].x);for(const bot of bots)reset(bot,late.room);result.warningResume=true;result.oldConnectionRejected=true;paused=false;console.log('PASS: warning freezes offline and resumes safely; late old jump/use rejected');
+    }
+    await sleep(60);
+  }
+  const r=latest();assert.equal(r.boss.hp,0);assert.equal(r.boss.hits.length,3);assert.ok(r.boss.hits.every(h=>h.lurer!==h.attacker));assert.ok(r.boss.hits.slice(1).every((h,i)=>h.lurer!==r.boss.hits[i].lurer));assert.ok(r.players.every(p=>p.x>1060&&!p.downed));assert.equal(r.results[0].level,'boss');result.alternatingHits=true;result.bothWon=true;console.log('PASS: three alternating lure/stomp pairs, gate opens, both players reach the flag');
+}finally{paused=true;clearInterval(sim);clearInterval(net);while(bots.some(b=>b.pending))await sleep(20);}
+const views=await Promise.all(bots.map(bot=>api({action:'poll',code:a.room.code,token:bot.token,connection:latest().players[bot.slot].connection})));assert.deepEqual(views[0].room.boss.hits,views[1].room.boss.hits);assert.deepEqual(views[0].room.results,views[1].room.results);if(drop)assert.equal(result.droppedResponses,1);if(recovery)assert.ok(result.rescue&&result.checkpointRetry&&result.warningResume&&result.oldConnectionRejected);
+const replay=await api({action:'restart',code:a.room.code,token:a.token,connection:views[0].room.players[0].connection,epoch:views[0].room.epoch});assert.equal(replay.room.boss.hp,3);assert.equal(replay.room.boss.hits.length,0);assert.equal(replay.room.level,'boss');for(const bot of bots)await api({action:'leave',code:a.room.code,token:bot.token,connection:replay.room.players[bot.slot].connection});
+console.log('RESULT '+JSON.stringify(result));
