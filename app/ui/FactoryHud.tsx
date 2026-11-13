@@ -1,0 +1,3 @@
+import type {PublicRoom} from "../lib/game";
+import {factoryObjective} from "../lib/factory";
+export function FactoryHud({room}:{room:PublicRoom|null}){const f=room?.factory;return <div className="factory-hud" role="status" aria-label="机关工厂合作进度"><div><b>机关工厂 · 钥匙接力</b><span className={f&&f.crateX>=320?"done":""}>供能 {f&&f.crateX>=320?"✓":"①"}</span><span className={f?.transfers?"done":""}>接力 {f?.transfers?"✓":"②"}</span><span className={f?.unlocked?"done":""}>出口 {f?.unlocked?"✓":"③"}</span>{f?.keyOwner!==null&&f?.keyOwner!==undefined&&<strong className={"role-p"+f.keyOwner}>P{f.keyOwner+1} 持钥匙</strong>}</div><p>{factoryObjective(room)}</p></div>;}
