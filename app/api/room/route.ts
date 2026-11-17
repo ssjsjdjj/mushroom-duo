@@ -1,5 +1,5 @@
 import {nextLevel} from "../../lib/adventure";
-import { env } from "cloudflare:workers";
+import { env } from "../../../standalone/database.mjs";
 import { advance, applyFrames, createRoom, restart, restartAdventure, readyNext, readyReplay, restoreCheckpoint, snapshot, spawn, upgradeRoom, validFrames, PROTOCOL, active, type Room, type InputFrame, type Level } from "../../lib/game";
 import {expireSeats,pausePlayer,resumePlayer,releaseSeat,placeAtCheckpoint} from "../../lib/connection";
 import {projectSave,SaveError,type SaveData} from "../../lib/save";
