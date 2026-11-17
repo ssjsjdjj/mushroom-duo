@@ -1,0 +1,14 @@
+{
+  "source": "mushroom-duo",
+  "sourceCommit": "11ccbf9b621e6c406219b987def3f6b88704cfb3",
+  "gameProtocol": 9,
+  "release": "phase9-standalone-render-free",
+  "adaptations": [
+    "app/api/room/route.ts: database binding import only",
+    "app/ui/DuoGame.tsx: framework Link replaced with standard anchor component",
+    "standalone: React build, Node HTTP adapter and SQLite adapter",
+    "DuoGame, AdventureSaveCard and globals.css: free-hosting cold start and ephemeral-save notices; game rules unchanged",
+    "render.yaml: Free compute only, no paid disk or database"
+  ],
+  "publicWechatAccess": "Not yet verified; requires independent deployment and real WeChat test"
+}

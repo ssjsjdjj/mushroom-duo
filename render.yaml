@@ -1,0 +1,16 @@
+# Free compute only. No paid disk, database, worker or preview services.
+services:
+  - type: web
+    name: mushroom-duo-free
+    runtime: docker
+    plan: free
+    region: singapore
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /healthz
+    autoDeployTrigger: "off"
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DUO_DATA_DIR
+        value: /tmp/mushroom-duo

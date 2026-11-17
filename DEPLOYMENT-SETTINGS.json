@@ -1,0 +1,37 @@
+{
+  "status": "Prepared, not deployed. Render owner connection required.",
+  "provider": "Render",
+  "plan": "free",
+  "budget": 0,
+  "billing": "Do not add a payment method, paid resources or automatic paid upgrades.",
+  "serviceName": "mushroom-duo-free",
+  "builder": "Dockerfile",
+  "startCommand": "node dist/launch.mjs",
+  "healthcheckPath": "/healthz",
+  "region": "singapore",
+  "replicas": 1,
+  "persistentDisk": false,
+  "additionalDatabase": false,
+  "variables": {
+    "NODE_ENV": "production",
+    "DUO_DATA_DIR": "/tmp/mushroom-duo"
+  },
+  "network": {
+    "publicHTTPS": true,
+    "visitorLogin": false,
+    "targetPort": "PORT environment variable"
+  },
+  "limitations": [
+    "Service sleeps after 15 minutes without traffic; next visit takes about a minute to start.",
+    "Rooms and server saves are lost on sleep, restart or deployment; browser completion records remain.",
+    "Free quotas apply. Pause rather than incur charges.",
+    "Assigned domain stays fixed while the service exists; ongoing availability depends on platform policies."
+  ],
+  "requiredBeforeRelease": [
+    "Connect the owner Render account and use Free compute only.",
+    "Sync release to a controlled private GitHub branch or subdirectory.",
+    "Verify Linux Docker build and 128 build-stage checks.",
+    "Obtain the actual HTTPS domain and verify anonymous two-player play.",
+    "Verify affected phone browser access."
+  ]
+}
